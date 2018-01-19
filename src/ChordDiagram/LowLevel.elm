@@ -1,4 +1,4 @@
-module ChordDiagram.LowLevel exposing (..)
+module ChordDiagram.LowLevel exposing (ChordGroup, SubGroup, Chord, createChords, drawBorder, drawChord)
 
 {-| Drawing Chord Diagrams
 -}
@@ -22,8 +22,8 @@ type alias SubGroup =
 
 
 {-| -}
-divide : { padAngle : Float, startAngle : Float } -> List (List Float) -> List Group
-divide { padAngle, startAngle } rows =
+divideCircle : { padAngle : Float, startAngle : Float } -> List (List Float) -> List Group
+divideCircle { padAngle, startAngle } rows =
     let
         -- calculate the size of one unit value
         tau =
@@ -105,25 +105,25 @@ partitionGroup k dx startAngle values =
 -- Phase 2, make the connections between subgroups
 
 
-type alias Ribbon =
+type alias Chord =
     { source : SubGroup
     , target : SubGroup
     }
 
 
-type alias Category =
+type alias ChordGroup =
     { startAngle : Float
     , endAngle : Float
     , value : Float
-    , connections : List Ribbon
+    , connections : List Chord
     }
 
 
-chord : { padAngle : Float, startAngle : Float } -> List (List Float) -> List Category
-chord config rows =
+createChords : { padAngle : Float, startAngle : Float } -> List (List Float) -> List ChordGroup
+createChords config rows =
     let
         groups =
-            divide config rows
+            divideCircle config rows
 
         mapper { startAngle, endAngle, value } relation =
             { startAngle = startAngle - pi / 2
@@ -135,7 +135,7 @@ chord config rows =
         List.map2 mapper groups (connections groups)
 
 
-connections : List Group -> List (List Ribbon)
+connections : List Group -> List (List Chord)
 connections groups =
     let
         rows =
@@ -150,11 +150,11 @@ connections groups =
                 Nothing
             else if source.value == target.value then
                 -- we have to make a choice here, angles are unique
-                if source.startAngle < target.endAngle then
+                if source.startAngle < target.startAngle then
                     Nothing
                 else
                     Just { source = source, target = target }
-            else if source.value < target.value then
+            else if source.value > target.value then
                 Nothing
             else
                 Just { source = source, target = target }
@@ -168,8 +168,8 @@ connections groups =
 -- Phase 3 - convert to paths
 
 
-drawRibbon : { sourceRadius : Float, targetRadius : Float, pullout : Float } -> Ribbon -> SubPath.SubPath
-drawRibbon { sourceRadius, targetRadius, pullout } { source, target } =
+drawChord : { sourceRadius : Float, targetRadius : Float, pullout : Float } -> Chord -> SubPath.SubPath
+drawChord { sourceRadius, targetRadius, pullout } { source, target } =
     if source.value == 0 && target.value == 0 then
         SubPath.empty
     else
@@ -207,61 +207,40 @@ drawRibbon { sourceRadius, targetRadius, pullout } { source, target } =
             if sa0 == ta0 && sa1 == ta1 then
                 -- source and target are the same
                 SubPath.subpath (Command.MoveTo s0) <|
-                    [ arc center1 sourceRadius sa0 sa1 True
+                    [ arc center1 sourceRadius sa0 sa1 clockwise
                     , quadratic ( ( 0, 0 ), s0 )
                     , Command.closePath
                     ]
             else
                 SubPath.subpath (Command.MoveTo s0) <|
-                    [ arc center1 sourceRadius sa0 sa1 True
+                    [ arc center1 sourceRadius sa0 sa1 clockwise
                     , quadratic ( ( 0, 0 ), t0 )
-                    , arc center2 targetRadius ta0 ta1 True
+                    , arc center2 targetRadius ta0 ta1 clockwise
                     , quadratic ( ( 0, 0 ), s0 )
                     , Command.closePath
                     ]
 
 
-arc : ( Float, Float ) -> Float -> Float -> Float -> Bool -> Command.DrawTo
-arc ( x, y ) r a0 a1 ccw =
+arc : ( Float, Float ) -> Float -> Float -> Float -> Command.Direction -> Command.DrawTo
+arc center r a0 a1 direction =
     let
-        dx =
-            r * cos a0
-
-        dy =
-            r * sin a0
-
-        x0 =
-            x * dx
-
-        y0 =
-            y * dy
-
         da =
-            if ccw then
+            if direction == counterClockwise then
                 a0 - a1
             else
                 a1 - a0
     in
         { radii = ( r, r )
+        , center = center
         , xAxisRotate = 0
-        , arcFlag =
-            if da >= pi then
-                largestArc
-            else
-                smallestArc
-        , direction =
-            if ccw then
-                counterClockwise
-            else
-                clockwise
-        , target = ( x + r * cos a1, y + r * sin a1 )
+        , startAngle = a0
+        , deltaTheta = da
         }
-            |> List.singleton
-            |> Command.arcTo
+            |> Arc.arc
 
 
-border : Float -> Float -> Float -> Float -> SubPath.SubPath
-border width innerRadius endAngle startAngle =
+drawBorder : Float -> Float -> Float -> Float -> SubPath.SubPath
+drawBorder width innerRadius endAngle startAngle =
     let
         outerRadius =
             innerRadius + width
@@ -287,11 +266,11 @@ border width innerRadius endAngle startAngle =
             }
 
         secondConfig =
-            { radii = ( outerRadius, outerRadius )
-            , center = ( 0, 0 )
-            , xAxisRotate = 0
+            { center = ( 0, 0 )
+            , radii = ( outerRadius, outerRadius )
             , startAngle = endAngle
             , deltaTheta = startAngle - endAngle
+            , xAxisRotate = 0
             }
     in
         SubPath.subpath (Command.moveTo firstStart)

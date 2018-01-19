@@ -6,158 +6,244 @@ module ChordDiagram exposing (..)
 import Svg exposing (Svg)
 import Svg.Attributes as Attributes exposing (width, height, viewBox, transform)
 import SubPath
-import LowLevel.Command as Command exposing (smallestArc, largestArc, clockwise, counterClockwise)
-import List.Extra as List
+import ChordDiagram.LowLevel as LowLevel exposing (ChordGroup, Chord, drawBorder, drawChord)
 import Color
 import Color.Convert exposing (colorToCssRgb)
-import Arc
+
+
+type alias Matrix =
+    List ( String, List Float )
+
+
+type alias Config =
+    { groupConfigs : List GroupConfig
+    , radius : Float
+    , pulloutSize : Float
+    , padding : Float
+    }
+
+
+type alias GroupConfig =
+    { connectionStyle : { color : Color.Color, border : Border, opacity : Float }
+    , nodeSegmentStyle : NodeSegmentStyle
+    , label : Label
+    }
 
 
 type alias Border =
     { color : Color.Color, width : Float, opacity : Float }
 
 
-type alias Config =
-    { connector : { color : Color.Color, border : Border, opacity : Float }
-    , source : { width : Float, color : Color.Color, border : Border, opacity : Float }
-    , label : String
-    , radius : Float
-    , offset : Float
-    , pulloutSize : Float
-    }
+type alias NodeSegmentStyle =
+    { width : Float, color : Color.Color, border : Border, opacity : Float }
 
 
-defaultConfig : Color.Color -> Config
-defaultConfig primary =
+type alias Label =
+    { text : String, orientation : Orientation, padding : Float, fontSize : String }
+
+
+{-| A simle config for a ChordGroup
+
+It takes a color as its argument and uses that
+for the border, the chord border and the chord fill (with opacity 0.67)
+-}
+simpleConfig : Color.Color -> Config
+simpleConfig primary =
     let
         border =
             { color = primary, width = 2, opacity = 1 }
 
-        connector =
-            { color = primary, border = border, opacity = 0.67 }
-
-        source =
-            { width = 20, color = primary, border = border, opacity = 1 }
+        groupConfig =
+            { connectionStyle =
+                { color = primary, border = border, opacity = 0.67 }
+            , nodeSegmentStyle =
+                { width = 20, color = primary, border = border, opacity = 1 }
+            , label = { text = "", orientation = orthogonal, padding = 20, fontSize = ".35em" }
+            }
     in
-        { connector = connector
-        , source = source
-        , label = "foo"
+        { groupConfigs = [ groupConfig ]
+        , padding = degrees 5
         , radius = 200
-        , offset = pi
         , pulloutSize = 0
         }
 
 
+rotate : Float -> String
 rotate angle =
     "rotate(" ++ toString angle ++ ")"
 
 
+translate : Float -> Float -> String
 translate x y =
     "translate(" ++ toString x ++ "," ++ toString y ++ ")"
 
 
-renderCategory : Config -> Category -> Svg msg
-renderCategory config category =
+type Orientation
+    = Parallel
+    | Orthogonal
+
+
+parallel : Orientation
+parallel =
+    Parallel
+
+
+orthogonal : Orientation
+orthogonal =
+    Orthogonal
+
+
+rotation angle radius pullout orientation =
+    case orientation of
+        Orthogonal ->
+            [ Attributes.textAnchor
+                (if angle > 0.5 * pi && angle < 1.5 * pi then
+                    "end"
+                 else
+                    "start"
+                )
+            , Attributes.transform <|
+                String.concat
+                    [ uncurry translate (fromPolar ( radius, angle ))
+                    , translate pullout 0
+                    , rotate (angle * 180 / pi)
+                    , if angle > 0.5 * pi && angle < 1.5 * pi then
+                        rotate 180
+                      else
+                        rotate 0
+                    ]
+            ]
+
+        Parallel ->
+            [ Attributes.textAnchor "middle"
+            , Attributes.transform <|
+                String.concat
+                    [ uncurry translate (fromPolar ( radius, angle ))
+                    , translate pullout 0
+                    , rotate (angle * 180 / pi + 90)
+                    ]
+            ]
+
+
+renderLabel : Float -> Float -> Float -> Label -> Svg msg
+renderLabel angle radius pullout label =
+    Svg.text_
+        (rotation angle (radius + label.padding) pullout Orthogonal
+            ++ [ Attributes.dy label.fontSize
+               , Attributes.class "elm-chord-diagram-label"
+               ]
+        )
+        [ Svg.text label.text ]
+
+
+renderBorder : { a | startAngle : Float, endAngle : Float, width : Float, innerRadius : Float } -> NodeSegmentStyle -> Float -> Svg msg
+renderBorder { startAngle, endAngle, width, innerRadius } segment pullout =
+    LowLevel.drawBorder width innerRadius startAngle endAngle
+        |> flip SubPath.element
+            [ Attributes.stroke (colorToCssRgb segment.border.color)
+            , Attributes.strokeWidth (toString segment.border.width)
+            , Attributes.fill (colorToCssRgb segment.color)
+            , Attributes.fillOpacity (toString segment.opacity)
+            ]
+        |> List.singleton
+        |> Svg.g
+            [ Attributes.transform <| translate pullout 0
+            ]
+
+
+pointsLeft angle =
+    angle > 0.5 * pi && angle < 1.5 * pi
+
+
+renderChord : { a | radius : Float, pulloutSize : Float } -> { b | border : Border, color : Color.Color, opacity : Float } -> Chord -> Svg msg
+renderChord global config chord =
     let
-        angle =
-            ((category.startAngle + category.endAngle) / 2)
-
-        pullout =
-            if angle > 0.5 * pi && angle < 1.5 * pi then
-                -config.pulloutSize
-            else
-                config.pulloutSize
-
-        label =
-            Svg.text_
-                [ Attributes.dy ".35em"
-                , Attributes.class "titles"
-                , Attributes.textAnchor
-                    (if angle > pi then
-                        "end"
-                     else
-                        "start"
-                    )
-                , Attributes.transform <|
-                    String.concat
-                        [ uncurry translate (fromPolar ( config.radius + config.source.width + 55, angle ))
-                        , translate pullout 0
-                        , rotate (angle * 180 / pi)
-                        , if angle > 0.5 * pi && angle < 1.5 * pi then
-                            rotate 180
-                          else
-                            rotate 0
-                        ]
-                ]
-                [ Svg.text config.label ]
-
-        b =
-            border config.source.width config.radius category.startAngle category.endAngle
-                |> flip SubPath.element
-                    [ Attributes.stroke (colorToCssRgb config.source.border.color)
-                    , Attributes.strokeWidth (toString config.connector.border.width)
-                    , Attributes.fill (colorToCssRgb config.source.color)
-                    , Attributes.fillOpacity (toString config.source.opacity)
-                    ]
-                |> List.singleton
-                |> Svg.g
-                    [ Attributes.transform <| translate pullout 0
-                    ]
-
         attributes =
-            [ Attributes.stroke (colorToCssRgb config.connector.border.color)
-            , Attributes.strokeWidth (toString config.connector.border.width)
-            , Attributes.fill (colorToCssRgb config.connector.color)
-            , Attributes.fillOpacity (toString config.connector.opacity)
+            [ Attributes.stroke (colorToCssRgb config.border.color)
+            , Attributes.strokeWidth (toString config.border.width)
+            , Attributes.fill (colorToCssRgb config.color)
+            , Attributes.fillOpacity (toString config.opacity)
             ]
 
         connects =
-            List.map
-                (\current ->
-                    SubPath.element
-                        (drawRibbon
-                            { sourceRadius = config.radius
-                            , targetRadius = config.radius
-                            , pullout =
-                                if ((current.source.startAngle + current.source.endAngle) / 2) < pi then
-                                    config.pulloutSize
-                                else
-                                    -config.pulloutSize
-                            }
-                            current
-                        )
-                        attributes
+            SubPath.element
+                (LowLevel.drawChord
+                    { sourceRadius = global.radius
+                    , targetRadius = global.radius
+                    , pullout =
+                        if ((chord.source.startAngle + chord.source.endAngle) / 2) < pi then
+                            global.pulloutSize
+                        else
+                            -global.pulloutSize
+                    }
+                    chord
                 )
-                category.connections
+                attributes
     in
-        Svg.g [] (label :: b :: connects)
+        connects
 
 
+renderChordGroup : { a | radius : Float, pulloutSize : Float, padding : Float } -> GroupConfig -> ChordGroup -> Svg msg
+renderChordGroup global groupConfig chordGroup =
+    let
+        angle =
+            ((chordGroup.startAngle + chordGroup.endAngle) / 2)
 
-{-
-   main =
-       let
-           colors =
-               [ "#000000", "#FFDD89", "#957244", "#F26223" ]
-                   |> List.map (Color.Convert.hexToColor >> Result.withDefault Color.black)
+        pullout =
+            if pointsLeft angle then
+                -global.pulloutSize
+            else
+                global.pulloutSize
 
-           makeAttributes : String -> List (Svg.Attribute msg)
-           makeAttributes color =
-               [ Attributes.fillOpacity "0.67", Attributes.stroke color, Attributes.fill color ]
+        label =
+            renderLabel angle (global.radius + groupConfig.nodeSegmentStyle.width) pullout groupConfig.label
 
-           groups =
-               chord { padAngle = degrees 5, startAngle = 0 } matrix
+        border =
+            let
+                settings =
+                    { startAngle = chordGroup.startAngle
+                    , endAngle = chordGroup.endAngle
+                    , width = groupConfig.nodeSegmentStyle.width
+                    , innerRadius = global.radius
+                    }
+            in
+                renderBorder settings groupConfig.nodeSegmentStyle pullout
 
-           config =
-               defaultConfig
+        chords =
+            List.map (renderChord global groupConfig.connectionStyle) chordGroup.connections
+    in
+        Svg.g [] (label :: border :: chords)
 
-           categories : List Category
-           categories =
-               groups
 
-           -- |> List.indexedMap (\i e -> List.take (1 + i) e)
-       in
-           Svg.svg [ width "1200", height "1200" ]
-               [ Svg.g [ transform "translate(550,550)" ] <| List.map2 (\color category -> renderCategory (defaultConfig color) category) (colors ++ colors) categories
-               ]
--}
+setText text groupConfig =
+    let
+        label =
+            groupConfig.label
+    in
+        { groupConfig | label = { label | text = text } }
+
+
+diagram : { width : Float, height : Float } -> Config -> Matrix -> Svg msg
+diagram canvas config matrix =
+    let
+        ( labels, numbers ) =
+            List.unzip matrix
+
+        chords =
+            LowLevel.createChords
+                { padAngle = config.padding
+                , startAngle = 0
+                }
+                numbers
+
+        groupConfigs =
+            let
+                repeats =
+                    ceiling (toFloat (List.length labels) / toFloat (List.length config.groupConfigs))
+            in
+                List.concat (List.repeat repeats config.groupConfigs)
+
+        rendered =
+            List.map3 (\label chordGroup groupConfig -> renderChordGroup config (setText label groupConfig) chordGroup) labels chords groupConfigs
+    in
+        Svg.g [ transform (translate (canvas.width / 2) (canvas.height / 2)) ] rendered
